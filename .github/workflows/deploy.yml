@@ -1,0 +1,34 @@
+﻿name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/clipvue-barber:latest
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/clipvue-barber:latest
+            docker stop clipvue || true
+            docker rm clipvue || true
+            docker run -d --name clipvue -p 8080:8080 -e DATABASE_URL=/data/clipvue.db -e JWT_SECRET=${{ secrets.JWT_SECRET }} -e ADMIN_USER=admin -e ADMIN_PASS=${{ secrets.ADMIN_PASS }} -e DEV_MODE=false -v /opt/clipvue/data:/data ${{ secrets.DOCKERHUB_USERNAME }}/clipvue-barber:latest

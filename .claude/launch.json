@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "clipvue-backend",
+      "runtimeExecutable": "powershell.exe",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:CARGO_HOME='D:\\rust\\cargo\\.cargo'; $env:RUSTUP_HOME='D:\\rust\\rustup\\.rustup'; $env:PATH='D:\\rust\\cargo\\.cargo\\bin;' + $env:PATH; cargo run -j 1"
+      ],
+      "port": 8080
+    }
+  ]
+}

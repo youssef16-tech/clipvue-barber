@@ -1,0 +1,13 @@
+﻿services:
+  clipvue:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: /data/clipvue.db
+      JWT_SECRET: change-me
+      ADMIN_USER: admin
+      ADMIN_PASS: admin123
+      DEV_MODE: "true"
+    volumes:
+      - ./data:/data
