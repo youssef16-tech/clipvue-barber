@@ -153,15 +153,7 @@ fn init_db(path: &str) -> SqlResult<Connection> {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO barbers (id, name, photo_base64, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![Uuid::new_v4().to_string(), "Marcus Cole", "", now],
-        )?;
-        conn.execute(
-            "INSERT INTO barbers (id, name, photo_base64, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![Uuid::new_v4().to_string(), "Jordan Reid", "", now],
-        )?;
-        conn.execute(
-            "INSERT INTO barbers (id, name, photo_base64, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![Uuid::new_v4().to_string(), "Alex Torres", "", now],
+            params![Uuid::new_v4().to_string(), "7ooda", "", now],
         )?;
     }
 
@@ -548,6 +540,10 @@ async fn delete_barber(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg: 
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let id = path.into_inner();
     let conn = db.lock().unwrap();
+    // Remove the barber's bookings first (bookings.barber_id has no cascade, so a
+    // straight barber delete would fail the FK check when bookings exist). Slots and
+    // any waitlist entries are then removed by ON DELETE CASCADE when the barber goes.
+    conn.execute("DELETE FROM bookings WHERE barber_id = ?1", params![id]).unwrap();
     conn.execute("DELETE FROM barbers WHERE id = ?1", params![id]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
 }
