@@ -852,7 +852,9 @@
       if (!data.bookings?.length) { body.innerHTML = '<tr><td colspan="6" class="empty-state">No bookings</td></tr>'; return; }
       data.bookings.forEach(b => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${b.user_name || ''}</td><td>${b.barber_name || ''}</td>`;
+        // Customer cell shows the name plus a tap-to-call number so the admin can phone the client directly.
+        const phoneLink = b.user_phone ? `<br><a href="tel:${b.user_phone}" style="color:var(--blue);font-size:.82rem;font-weight:600">📞 ${b.user_phone}</a>` : '';
+        tr.innerHTML = `<td>${b.user_name || ''}${phoneLink}</td><td>${b.barber_name || ''}</td>`;
         // Editable time: admin can set any date/time for this appointment (Cairo local).
         const timeTd = document.createElement('td');
         const timeInput = document.createElement('input');
