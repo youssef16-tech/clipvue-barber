@@ -308,7 +308,10 @@
         </div>
         <div class="grid" style="margin-top:12px">
           <div class="card panel">
-            <h4>Dashboard</h4>
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+              <h4>Dashboard</h4>
+              <div class="form-group" style="margin:0"><label>Clients on day</label><input id="dashDate" type="date" style="width:auto" /></div>
+            </div>
             <div id="adminStats" class="stat-grid" style="margin-top:10px"></div>
             <h5 style="margin-top:16px;font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Popular barbers</h5>
             <div id="adminChart" class="bars"></div>
@@ -447,6 +450,18 @@
         return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
       } catch { return ''; }
     };
+    // Today's date (YYYY-MM-DD) in Cairo local time.
+    const todayCairo = () => toLocalInput(new Date().toISOString()).slice(0, 10) || new Date().toISOString().slice(0, 10);
+    // Normalise an Egyptian phone number to WhatsApp's international format (country code 20).
+    const waNumber = (phone) => {
+      let d = (phone || '').replace(/\D/g, '');
+      if (d.startsWith('00')) d = d.slice(2);
+      if (d.startsWith('20')) return d;
+      if (d.startsWith('0')) return '20' + d.slice(1);
+      if (d.length === 10 && d.startsWith('1')) return '20' + d;
+      return d;
+    };
+    const waLink = (phone, name, slotIso) => `https://wa.me/${waNumber(phone)}?text=${encodeURIComponent(`Hi ${name || ''}, your 7gozati appointment is on ${fmtTime(slotIso)}. See you then!`)}`;
 
     const toggleTheme = () => {
       const root = document.documentElement;
@@ -761,10 +776,14 @@
     });
 
     // ---------- Admin ----------
+    const dayLabel = (ymd) => { try { return new Date(ymd + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch { return ymd; } };
     const loadAdminData = async () => {
-      const stats = await api('/api/admin/dashboard');
+      const date = qs('dashDate').value || todayCairo();
+      qs('dashDate').value = date;
+      const stats = await api(`/api/admin/dashboard?date=${date}`);
       qs('adminStats').innerHTML = `
-        <div class="stat-box"><div class="num">${stats.bookings_today}</div><div class="lbl">Today</div></div>
+        <div class="stat-box" style="grid-column:1/-1"><div class="num">${stats.clients_on_date}</div><div class="lbl">Clients on ${dayLabel(stats.date)}</div></div>
+        <div class="stat-box"><div class="num">${stats.bookings_total}</div><div class="lbl">Total</div></div>
         <div class="stat-box"><div class="num">${stats.bookings_week}</div><div class="lbl">This week</div></div>
         <div class="stat-box"><div class="num">${stats.no_shows}</div><div class="lbl">No-shows</div></div>
         <div class="stat-box"><div class="num">${stats.cancelled}</div><div class="lbl">Cancelled</div></div>
@@ -774,6 +793,7 @@
         <div class="bar-col"><div class="bar-value">${p.count}</div><div class="bar" style="height:${Math.max(6, (p.count / max) * 100)}%"></div><div class="bar-label">${p.name}</div></div>`).join('') : '<div class="empty-state">No bookings yet</div>';
       await Promise.all([renderBarberList(), renderAdminSlots(), renderAdminBookings()]);
     };
+    qs('dashDate').addEventListener('change', loadAdminData);
 
     const renderBarberList = async () => {
       const list = qs('barberList'); list.innerHTML = '';
@@ -852,6 +872,13 @@
         sel.onchange = async () => { try { await api(`/api/admin/bookings/${b.id}`, { method: 'PUT', body: JSON.stringify({ status: sel.value }) }); toast('Booking updated'); await loadAdminData(); } catch (err) { toast(err.message, true); } };
         statusTd.appendChild(sel); tr.appendChild(statusTd);
         const actionTd = document.createElement('td');
+        actionTd.style.whiteSpace = 'nowrap';
+        // Click-to-chat: opens WhatsApp with a prefilled note about the (possibly changed) time.
+        const wa = document.createElement('a');
+        wa.className = 'btn btn-primary btn-sm'; wa.textContent = 'WhatsApp';
+        wa.href = waLink(b.user_phone, b.user_name, b.slot_start);
+        wa.target = '_blank'; wa.rel = 'noopener'; wa.style.marginRight = '6px'; wa.style.display = 'inline-block';
+        actionTd.appendChild(wa);
         const del = document.createElement('button'); del.className = 'btn btn-danger btn-sm'; del.textContent = 'Delete';
         del.onclick = async () => { if (!confirm('Delete this booking?')) return; try { await api(`/api/admin/bookings/${b.id}`, { method: 'DELETE' }); toast('Booking deleted'); await Promise.all([loadAdminData(), loadPublic(), loadSlots()]); } catch (err) { toast(err.message, true); } };
         actionTd.appendChild(del); tr.appendChild(actionTd);
@@ -874,6 +901,8 @@
     const init = async () => {
       initTheme();
       setAuthMode('signup');
+      const today = todayCairo();
+      qs('dateFilter').value = today; qs('adminDate').value = today; qs('dashDate').value = today;
       try { await getCsrf(); } catch {}
       // Restore whichever session is active: customer first, then admin.
       try {
@@ -886,8 +915,6 @@
       api('/api/analytics/pageview', { method: 'POST', body: JSON.stringify({ path: location.pathname }) }).catch(() => {});
       if (!localStorage.getItem('gdpr')) { qs('gdprBanner').style.display = 'block'; }
       if (!navigator.onLine) { qs('offlineBanner').classList.remove('hidden'); }
-      const today = new Date().toISOString().slice(0, 10);
-      qs('dateFilter').value = today; qs('adminDate').value = today;
     };
     window.addEventListener('DOMContentLoaded', init);
   </script>

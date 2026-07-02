@@ -431,31 +431,64 @@ fn require_admin(req: &HttpRequest, cfg: &AppConfig) -> Result<Claims, HttpRespo
 }
 
 #[get("/api/admin/dashboard")]
-async fn admin_dashboard(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
+async fn admin_dashboard(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, query: Query<HashMap<String, String>>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let conn = db.lock().unwrap();
+
+    // "Clients on <day>" is counted by appointment time (the slot), in Cairo local days,
+    // so it answers "how many clients on this date" rather than "how many booked today".
+    let tz = chrono_tz::Tz::Africa__Cairo;
+    let day = query.get("date")
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| Utc::now().with_timezone(&tz).date_naive());
+    let day_start_utc = tz.from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap()).single()
+        .map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(Utc::now);
+    let day_end_utc = day_start_utc + chrono::Duration::days(1);
+    let (rng_start, rng_end) = (day_start_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string(), day_end_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    // Clients scheduled that day, excluding cancellations.
+    let clients_on_date: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bookings b JOIN slots s ON s.id = b.slot_id WHERE b.status != 'cancelled' AND s.start_time >= ?1 AND s.start_time < ?2",
+        params![rng_start, rng_end], |row| row.get(0)).unwrap_or(0);
+
     let bookings_total: i64 = conn.query_row("SELECT COUNT(*) FROM bookings", [], |row| row.get(0)).unwrap_or(0);
-    let today: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE created_at LIKE ?1", [format!("{}%", Utc::now().format("%Y-%m-%d"))], |row| row.get(0)).unwrap_or(0);
     let week: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE created_at >= ?1", [Utc::now().checked_sub_signed(chrono::Duration::days(7)).unwrap().to_rfc3339()], |row| row.get(0)).unwrap_or(0);
     let no_shows: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE status = 'no_show'", [], |row| row.get(0)).unwrap_or(0);
     let cancelled: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE status = 'cancelled'", [], |row| row.get(0)).unwrap_or(0);
     let pageviews: i64 = conn.query_row("SELECT COUNT(*) FROM analytics", [], |row| row.get(0)).unwrap_or(0);
     let popular: Vec<serde_json::Value> = conn.prepare("SELECT b.name, COUNT(*) as count FROM bookings bk JOIN barbers b ON b.id = bk.barber_id GROUP BY b.id ORDER BY count DESC LIMIT 5").unwrap().query_map([], |row| Ok(json!({"name": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))).unwrap().filter_map(|v| v.ok()).collect();
-    HttpResponse::Ok().json(json!({"bookings_total": bookings_total, "bookings_today": today, "bookings_week": week, "no_shows": no_shows, "cancelled": cancelled, "pageviews": pageviews, "popular_barbers": popular}))
+    HttpResponse::Ok().json(json!({"date": day.format("%Y-%m-%d").to_string(), "clients_on_date": clients_on_date, "bookings_total": bookings_total, "bookings_week": week, "no_shows": no_shows, "cancelled": cancelled, "pageviews": pageviews, "popular_barbers": popular}))
 }
 
 #[get("/api/admin/bookings")]
 async fn admin_bookings(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, query: Query<HashMap<String, String>>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let conn = db.lock().unwrap();
-    let mut sql = "SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, u.name, br.name, s.start_time FROM bookings b JOIN users u ON u.id = b.user_id JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE 1=1".to_string();
+    let mut sql = "SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, u.name, br.name, s.start_time, u.phone FROM bookings b JOIN users u ON u.id = b.user_id JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE 1=1".to_string();
     let mut params_vec: Vec<String> = Vec::new();
     if let Some(status) = query.get("status") { if !status.is_empty() { sql.push_str(" AND b.status = ?"); params_vec.push(status.clone()); } }
     if let Some(barber_id) = query.get("barber_id") { if !barber_id.is_empty() { sql.push_str(" AND b.barber_id = ?"); params_vec.push(barber_id.clone()); } }
+    // Filter by a Cairo-local calendar day (matches the dashboard's per-day count).
+    if let Some(date) = query.get("date") {
+        if let Ok(d) = NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+            let tz = chrono_tz::Tz::Africa__Cairo;
+            if let Some(start) = tz.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap()).single() {
+                let start_utc = start.with_timezone(&Utc);
+                let end_utc = start_utc + chrono::Duration::days(1);
+                sql.push_str(" AND s.start_time >= ? AND s.start_time < ?");
+                params_vec.push(start_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+                params_vec.push(end_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            }
+        }
+    }
     let dir = if query.get("sort").map(|s| s.as_str()) == Some("asc") { "ASC" } else { "DESC" };
     sql.push_str(&format!(" ORDER BY s.start_time {dir}"));
     let mut stmt = conn.prepare(&sql).unwrap();
-    let bookings = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: row.get(8).ok(), barber_name: row.get(9).ok(), slot_start: row.get(10).ok() })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
+    let bookings = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| Ok(json!({
+        "id": row.get::<_, String>(0)?, "user_id": row.get::<_, String>(1)?, "barber_id": row.get::<_, String>(2)?,
+        "slot_id": row.get::<_, String>(3)?, "service_name": row.get::<_, String>(4)?, "selfie_base64": row.get::<_, Option<String>>(5)?,
+        "status": row.get::<_, String>(6)?, "created_at": row.get::<_, String>(7)?, "user_name": row.get::<_, Option<String>>(8)?,
+        "barber_name": row.get::<_, Option<String>>(9)?, "slot_start": row.get::<_, Option<String>>(10)?, "user_phone": row.get::<_, Option<String>>(11)?
+    }))).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
     HttpResponse::Ok().json(json!({"bookings": bookings}))
 }
 
