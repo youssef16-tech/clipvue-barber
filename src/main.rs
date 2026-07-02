@@ -1019,6 +1019,18 @@ async fn reminder_loop(db: Data<Db>, cfg: Data<AppConfig>) {
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
+    // Production safety: never boot a public instance with the built-in dev defaults.
+    let is_prod = !std::env::var("DEV_MODE").map(|v| v == "true" || v == "1").unwrap_or(true);
+    if is_prod {
+        if std::env::var("JWT_SECRET").map(|v| v.trim().is_empty()).unwrap_or(true) {
+            panic!("Refusing to start: set a strong JWT_SECRET when DEV_MODE=false (e.g. `fly secrets set JWT_SECRET=...`).");
+        }
+        if std::env::var("ADMIN_PASS").map(|v| v.trim().is_empty() || v == "admin123").unwrap_or(true) {
+            panic!("Refusing to start: set a non-default ADMIN_PASS when DEV_MODE=false (e.g. `fly secrets set ADMIN_PASS=...`).");
+        }
+    }
+
     let db_path = std::env::var("DATABASE_URL").unwrap_or_else(|_| "clipvue.db".to_string());
     let conn = init_db(&db_path).expect("db init failed");
     let mut cfg_val = AppConfig::from_env();
