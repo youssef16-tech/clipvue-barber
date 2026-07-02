@@ -45,9 +45,9 @@ self.addEventListener('fetch', event => {
 });
 
 self.addEventListener('push', event => {
-  let data = { title: 'ClipVue', body: 'You have a new notification' };
+  let data = { title: '7gozati', body: 'You have a new notification' };
   try { if (event.data) data = event.data.json(); } catch (e) { /* non-JSON payload, use default */ }
-  event.waitUntil(self.registration.showNotification(data.title || 'ClipVue', {
+  event.waitUntil(self.registration.showNotification(data.title || '7gozati', {
     body: data.body || '',
     icon: data.icon || '/manifest.json',
     badge: '/manifest.json',

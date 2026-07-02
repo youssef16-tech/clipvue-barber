@@ -5,8 +5,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#845ec2" />
-  <meta name="description" content="ClipVue – premium barber booking" />
-  <title>ClipVue</title>
+  <meta name="description" content="7gozati – premium barber booking" />
+  <title>7gozati</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/manifest.json" />
   <style>
@@ -212,11 +212,10 @@
 <body>
   <nav class="nav">
     <div class="nav-inner">
-      <div class="brand">ClipVue</div>
+      <div class="brand">7gozati</div>
       <div class="nav-actions">
         <button class="icon-btn hidden" id="installBtn" title="Install app">⇩</button>
         <button class="icon-btn" id="themeToggle" title="Toggle theme">☀︎</button>
-        <button class="btn btn-outline btn-sm hidden" id="adminNavBtn">Admin</button>
         <button class="btn btn-outline btn-sm hidden" id="logoutBtn">Logout</button>
       </div>
     </div>
@@ -251,7 +250,7 @@
     </section>
 
     <section id="appScreen" class="hidden">
-      <div class="card panel" style="margin-top:20px">
+      <div class="card panel" id="userDash" style="margin-top:20px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
           <div>
             <div class="pill">Dashboard</div>
@@ -294,7 +293,7 @@
         </div>
       </div>
 
-      <div class="card panel" style="margin-top:20px">
+      <div class="card panel" id="privacyCard" style="margin-top:20px">
         <h3>Privacy &amp; data</h3>
         <footer class="gdpr-links">
           <button id="gdprExportBtn">Export my data</button>
@@ -386,18 +385,6 @@
     </div>
   </div>
 
-  <div id="adminLoginModal" class="modal-overlay hidden">
-    <div class="card modal" style="position:relative;max-width:360px">
-      <button class="btn btn-outline icon-btn modal-close" id="closeAdminModal">✕</button>
-      <h3>Admin sign in</h3>
-      <form id="adminLoginForm">
-        <div class="form-group" style="margin-top:14px"><label>Username</label><input id="adminUser" autocomplete="username" /></div>
-        <div class="form-group"><label>Password</label><input id="adminPass" type="password" autocomplete="current-password" /></div>
-        <button class="btn btn-primary btn-block">Sign in</button>
-      </form>
-    </div>
-  </div>
-
   <div id="toastWrap" class="toast-wrap"></div>
   <div id="offlineBanner" class="banner hidden">You are offline — showing cached data</div>
   <div id="gdprBanner" class="card panel"
@@ -446,11 +433,20 @@
     const getCsrf = async () => { const data = await api('/api/csrf-token', { method: 'GET' }); state.csrf = data.csrf_token; };
     const registerSW = () => { if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').then(reg => reg.update()).catch(() => { }); } };
 
-    // ClipVue operates in Egypt only — all times are handled in Cairo local time.
+    // 7gozati operates in Egypt only — all times are handled in Cairo local time.
     const TZ = 'Africa/Cairo';
     const userTz = () => TZ;
     const fmtTime = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: userTz() }).format(new Date(iso)); } catch { return iso; } };
     const fmtShort = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', timeZone: userTz() }).format(new Date(iso)); } catch { return iso; } };
+    // UTC ISO -> "YYYY-MM-DDTHH:MM" wall-clock in Cairo, for prefilling datetime-local inputs.
+    const toLocalInput = (iso) => {
+      if (!iso) return '';
+      try {
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(iso));
+        const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+        return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+      } catch { return ''; }
+    };
 
     const toggleTheme = () => {
       const root = document.documentElement;
@@ -482,32 +478,60 @@
       const btn = qs('authSubmit');
       btn.disabled = true;
       try {
-        const body = { phone: qs('phone').value.trim(), password: qs('password').value };
-        if (authMode === 'signup') { body.name = qs('name').value.trim(); body.timezone = TZ; body.gdpr_consent = qs('gdpr').checked; }
-        const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
-        const data = await api(endpoint, { method: 'POST', body: JSON.stringify(body) });
-        state.user = data.user;
-        toast(authMode === 'login' ? 'Welcome back' : 'Account created');
-        await showApp();
+        const identifier = qs('phone').value.trim();
+        const password = qs('password').value;
+        if (authMode === 'signup') {
+          const data = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ name: qs('name').value.trim(), phone: identifier, password, timezone: TZ, gdpr_consent: qs('gdpr').checked }) });
+          state.user = data.user; toast('Account created'); await showApp(); return;
+        }
+        // Login: try as a normal customer first, then fall back to admin credentials
+        // (admin is recognised by entering the admin username/password in this same form).
+        try {
+          const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ phone: identifier, password }) });
+          state.user = data.user; state.admin = false; toast('Welcome back'); await showApp();
+        } catch (userErr) {
+          try {
+            await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: identifier, password }) });
+            state.admin = true; state.user = null; toast('Admin mode'); await showAdmin();
+          } catch (adminErr) {
+            throw userErr; // surface the customer-login error, not the admin one
+          }
+        }
       } catch (err) { toast(err.message, true); } finally { btn.disabled = false; }
     };
     qs('authForm').addEventListener('submit', signupOrLogin);
 
     qs('logoutBtn').addEventListener('click', async () => {
-      try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
       if (state.admin) { try { await api('/api/admin/logout', { method: 'POST' }); } catch {} }
-      state.user = null; state.admin = false; qs('adminPanel').classList.add('hidden'); showAuth();
+      if (state.user) { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} }
+      state.user = null; state.admin = false; showAuth();
     });
 
     // ---------- Screens ----------
-    const showAuth = () => { qs('authScreen').classList.remove('hidden'); qs('appScreen').classList.add('hidden'); qs('logoutBtn').classList.add('hidden'); qs('adminNavBtn').classList.remove('hidden'); };
+    const showAuth = () => {
+      qs('authScreen').classList.remove('hidden'); qs('appScreen').classList.add('hidden');
+      qs('logoutBtn').classList.add('hidden'); qs('adminPanel').classList.add('hidden');
+      qs('userDash').classList.remove('hidden'); qs('privacyCard').classList.remove('hidden');
+    };
     const showApp = async () => {
       qs('authScreen').classList.add('hidden'); qs('appScreen').classList.remove('hidden');
-      qs('logoutBtn').classList.remove('hidden'); qs('adminNavBtn').classList.remove('hidden');
+      qs('logoutBtn').classList.remove('hidden');
+      qs('userDash').classList.remove('hidden'); qs('privacyCard').classList.remove('hidden');
+      qs('adminPanel').classList.add('hidden');
       qs('userName').textContent = state.user?.name ? `, ${state.user.name}` : '';
       await Promise.all([loadBarbers(), loadPublic()]);
       await loadSlots();
       await loadBookings();
+    };
+    // Admin-only view: the customer dashboard / privacy sections are user-specific
+    // (they'd 401 without a user login), so hide them and show the admin panel.
+    const showAdmin = async () => {
+      qs('authScreen').classList.add('hidden'); qs('appScreen').classList.remove('hidden');
+      qs('logoutBtn').classList.remove('hidden');
+      qs('userDash').classList.add('hidden'); qs('privacyCard').classList.add('hidden');
+      qs('adminPanel').classList.remove('hidden');
+      await Promise.all([loadBarbers(), loadPublic()]);
+      await loadAdminData();
     };
 
     // ---------- Barbers / Slots ----------
@@ -737,21 +761,6 @@
     });
 
     // ---------- Admin ----------
-    qs('adminNavBtn').addEventListener('click', () => { qs('adminLoginModal').classList.remove('hidden'); });
-    qs('closeAdminModal').addEventListener('click', () => qs('adminLoginModal').classList.add('hidden'));
-    qs('adminLoginForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      try {
-        await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: qs('adminUser').value, password: qs('adminPass').value }) });
-        state.admin = true;
-        qs('adminLoginModal').classList.add('hidden');
-        if (qs('appScreen').classList.contains('hidden')) { qs('authScreen').classList.add('hidden'); qs('appScreen').classList.remove('hidden'); await Promise.all([loadBarbers(), loadPublic()]); }
-        qs('adminPanel').classList.remove('hidden');
-        toast('Admin mode enabled');
-        await loadAdminData();
-      } catch (err) { toast(err.message, true); }
-    });
-
     const loadAdminData = async () => {
       const stats = await api('/api/admin/dashboard');
       qs('adminStats').innerHTML = `
@@ -823,7 +832,20 @@
       if (!data.bookings?.length) { body.innerHTML = '<tr><td colspan="6" class="empty-state">No bookings</td></tr>'; return; }
       data.bookings.forEach(b => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${b.user_name || ''}</td><td>${b.barber_name || ''}</td><td>${fmtTime(b.slot_start)}</td><td>${b.service_name || ''}</td>`;
+        tr.innerHTML = `<td>${b.user_name || ''}</td><td>${b.barber_name || ''}</td>`;
+        // Editable time: admin can set any date/time for this appointment (Cairo local).
+        const timeTd = document.createElement('td');
+        const timeInput = document.createElement('input');
+        timeInput.type = 'datetime-local';
+        timeInput.value = toLocalInput(b.slot_start);
+        timeInput.style.width = '190px';
+        timeInput.onchange = async () => {
+          if (!timeInput.value) return;
+          try { await api(`/api/admin/bookings/${b.id}`, { method: 'PUT', body: JSON.stringify({ start_time: timeInput.value, timezone: TZ }) }); toast('Time updated'); await Promise.all([loadAdminData(), loadPublic(), loadSlots()]); }
+          catch (err) { toast(err.message, true); }
+        };
+        timeTd.appendChild(timeInput); tr.appendChild(timeTd);
+        const serviceTd = document.createElement('td'); serviceTd.textContent = b.service_name || ''; tr.appendChild(serviceTd);
         const statusTd = document.createElement('td');
         const sel = document.createElement('select');
         ['confirmed', 'no_show', 'cancelled'].forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; if (s === b.status) o.selected = true; sel.appendChild(o); });
@@ -853,7 +875,13 @@
       initTheme();
       setAuthMode('signup');
       try { await getCsrf(); } catch {}
-      try { const me = await api('/api/auth/me'); state.user = me.user; await showApp(); } catch { showAuth(); }
+      // Restore whichever session is active: customer first, then admin.
+      try {
+        const me = await api('/api/auth/me'); state.user = me.user; await showApp();
+      } catch {
+        try { await api('/api/admin/me'); state.admin = true; await showAdmin(); }
+        catch { showAuth(); }
+      }
       registerSW();
       api('/api/analytics/pageview', { method: 'POST', body: JSON.stringify({ path: location.pathname }) }).catch(() => {});
       if (!localStorage.getItem('gdpr')) { qs('gdprBanner').style.display = 'block'; }

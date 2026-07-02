@@ -1,6 +1,6 @@
-﻿# ClipVue
+﻿# 7gozati
 
-ClipVue is a zero-cost, secure, premium barber booking experience built with Rust, Actix Web, SQLite, and a single-file PWA frontend.
+7gozati is a zero-cost, secure, premium barber booking experience built with Rust, Actix Web, SQLite, and a single-file PWA frontend.
 
 ## Run locally
 

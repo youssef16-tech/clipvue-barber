@@ -330,7 +330,7 @@ struct SlotsQuery { date: Option<String>, barber_id: Option<String>, include_una
 #[derive(Serialize, Deserialize)]
 struct WaitlistBody { slot_id: String }
 #[derive(Serialize, Deserialize)]
-struct UpdateBookingBody { status: Option<String>, service_name: Option<String> }
+struct UpdateBookingBody { status: Option<String>, service_name: Option<String>, start_time: Option<String>, timezone: Option<String> }
 #[derive(Serialize, Deserialize)]
 struct UpdateSlotBody { is_available: Option<bool> }
 #[derive(Serialize, Deserialize)]
@@ -424,6 +424,14 @@ async fn admin_logout(req: HttpRequest, db: Data<Db>) -> impl Responder {
     HttpResponse::Ok().cookie(cookie).json(json!({"ok": true}))
 }
 
+#[get("/api/admin/me")]
+async fn admin_me(req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
+    match require_admin(&req, &cfg) {
+        Ok(_) => HttpResponse::Ok().json(json!({"admin": true})),
+        Err(resp) => resp,
+    }
+}
+
 fn require_admin(req: &HttpRequest, cfg: &AppConfig) -> Result<Claims, HttpResponse> {
     let claims = admin_jwt_from_req(req, &cfg.jwt_secret).ok_or_else(|| HttpResponse::Unauthorized().json(json!({"error":"Admin required"})))?;
     if claims.role != "admin" { return Err(HttpResponse::Forbidden().json(json!({"error":"Admin required"}))); }
@@ -469,6 +477,42 @@ async fn update_admin_booking(path: Path<String>, body: Json<UpdateBookingBody>,
     let conn = db.lock().unwrap();
     if let Some(status) = new_status { conn.execute("UPDATE bookings SET status = ?1 WHERE id = ?2", params![status, id]).unwrap(); }
     if let Some(service) = new_service { conn.execute("UPDATE bookings SET service_name = ?1 WHERE id = ?2", params![service, id]).unwrap(); }
+    // Full time control: admin supplies a local wall-clock time (Cairo by default); we
+    // reinterpret it in that zone -> UTC and rewrite this booking's slot, preserving duration.
+    if let Some(start_local) = body.start_time.clone() {
+        let start_local = start_local.trim().to_string();
+        if !start_local.is_empty() {
+            if let Some((slot_id, old_start, old_end)) = conn.query_row(
+                "SELECT s.id, s.start_time, s.end_time FROM bookings b JOIN slots s ON s.id = b.slot_id WHERE b.id = ?1",
+                [id.clone()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            ).ok() {
+                let tzn: Tz = body.timezone.clone().unwrap_or_else(|| "Africa/Cairo".to_string()).parse().unwrap_or(chrono_tz::Tz::Africa__Cairo);
+                // Accept both "YYYY-MM-DDTHH:MM" (datetime-local) and with seconds.
+                let naive = NaiveDateTime::parse_from_str(&start_local, "%Y-%m-%dT%H:%M")
+                    .or_else(|_| NaiveDateTime::parse_from_str(&start_local, "%Y-%m-%dT%H:%M:%S"));
+                if let Ok(naive) = naive {
+                    let duration = match (DateTime::parse_from_rfc3339(&old_start), DateTime::parse_from_rfc3339(&old_end)) {
+                        (Ok(s), Ok(e)) => e - s,
+                        _ => chrono::Duration::minutes(30),
+                    };
+                    if let Some(local_dt) = tzn.from_local_datetime(&naive).single() {
+                        let start_utc = local_dt.with_timezone(&Utc);
+                        let end_utc = start_utc + duration;
+                        conn.execute(
+                            "UPDATE slots SET start_time = ?1, end_time = ?2 WHERE id = ?3",
+                            params![start_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string(), end_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string(), slot_id],
+                        ).unwrap();
+                        conn.execute("UPDATE bookings SET reminder_sent = 0 WHERE id = ?1", params![id]).unwrap();
+                    } else {
+                        return HttpResponse::BadRequest().json(json!({"error":"Invalid or ambiguous time"}));
+                    }
+                } else {
+                    return HttpResponse::BadRequest().json(json!({"error":"Invalid time format"}));
+                }
+            }
+        }
+    }
     HttpResponse::Ok().json(json!({"ok": true}))
 }
 
@@ -676,7 +720,7 @@ async fn cancel_booking(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg:
             drop(conn);
             if let Some((phone, push_sub)) = contact {
                 send_mail(&cfg, &format!("{}@clipvue.com", phone), "You're booked! (waitlist auto-fill)", &format!("A spot opened up and you were automatically booked for {slot_start}.")).await;
-                if let Some(sub) = push_sub { if !sub.is_empty() { send_push(&cfg, &sub, "ClipVue", "A spot opened up \u{2014} you're booked!").await; } }
+                if let Some(sub) = push_sub { if !sub.is_empty() { send_push(&cfg, &sub, "7gozati", "A spot opened up \u{2014} you're booked!").await; } }
             }
             return HttpResponse::Ok().json(json!({"ok": true}));
         }
@@ -902,8 +946,8 @@ async fn reminder_loop(db: Data<Db>, cfg: Data<AppConfig>) {
             if let Ok(slot_dt) = DateTime::parse_from_rfc3339(&slot_start) {
                 let diff = slot_dt.with_timezone(&Utc) - now;
                 if diff.num_seconds() > 0 && diff.num_seconds() <= 3600 {
-                    send_mail(&cfg, &format!("{}@clipvue.com", phone), "ClipVue reminder", &format!("Hello {user_name}, your appointment starts in under an hour.")).await;
-                    if let Some(sub) = push_sub { if !sub.is_empty() { send_push(&cfg, &sub, "ClipVue reminder", "Your appointment starts in under an hour.").await; } }
+                    send_mail(&cfg, &format!("{}@clipvue.com", phone), "7gozati reminder", &format!("Hello {user_name}, your appointment starts in under an hour.")).await;
+                    if let Some(sub) = push_sub { if !sub.is_empty() { send_push(&cfg, &sub, "7gozati reminder", "Your appointment starts in under an hour.").await; } }
                     let conn = db.lock().unwrap();
                     conn.execute("UPDATE bookings SET reminder_sent = 1 WHERE id = ?1", params![booking_id]).unwrap();
                 }
@@ -952,6 +996,7 @@ async fn main() -> std::io::Result<()> {
             .service(me)
             .service(admin_login)
             .service(admin_logout)
+            .service(admin_me)
             .service(admin_dashboard)
             .service(admin_bookings)
             .service(update_admin_booking)
