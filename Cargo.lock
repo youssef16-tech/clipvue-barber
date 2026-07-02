@@ -610,7 +610,6 @@ dependencies = [
  "csv",
  "dotenv",
  "env_logger",
- "futures-util",
  "hkdf",
  "jsonwebtoken",
  "lazy_static",
