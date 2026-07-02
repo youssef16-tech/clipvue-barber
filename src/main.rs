@@ -695,6 +695,9 @@ async fn create_booking(body: Json<CreateBookingBody>, db: Data<Db>, req: HttpRe
     if service.is_empty() { return HttpResponse::BadRequest().json(json!({"error":"Service required"})); }
     if !valid_image(&body.selfie_base64) { return HttpResponse::BadRequest().json(json!({"error":"Invalid image"})); }
     let conn = db.lock().unwrap();
+    // A customer can't hold a booking and a waitlist spot at the same time.
+    let on_waitlist: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE user_id = ?1", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
+    if on_waitlist > 0 { return HttpResponse::Conflict().json(json!({"error":"You're on a waitlist — leave it before booking a slot"})); }
     let slot_exists: i64 = conn.query_row("SELECT COUNT(*) FROM slots WHERE id = ?1 AND is_available = 1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
     if slot_exists == 0 { return HttpResponse::Conflict().json(json!({"error":"Slot unavailable"})); }
     let already: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE slot_id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
@@ -757,18 +760,42 @@ async fn cancel_booking(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg:
     HttpResponse::Ok().json(json!({"ok": true}))
 }
 
+const WAITLIST_MAX: i64 = 2;
+
 #[post("/api/waitlist")]
 async fn join_waitlist(body: Json<WaitlistBody>, db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let conn = db.lock().unwrap();
+    // Can't wait for a slot while already holding a confirmed booking.
+    let has_booking: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE user_id = ?1 AND status = 'confirmed'", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
+    if has_booking > 0 { return HttpResponse::Conflict().json(json!({"error":"You already have a booking — cancel it before joining a waitlist"})); }
+    // Only one waitlist spot per customer at a time.
+    let mine: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE user_id = ?1", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
+    if mine > 0 { return HttpResponse::Conflict().json(json!({"error":"You're already on a waitlist"})); }
+    // Only taken slots have a waitlist; an open slot should just be booked.
+    match conn.query_row("SELECT is_available FROM slots WHERE id = ?1", [body.slot_id.clone()], |row| row.get::<_, i64>(0)).ok() {
+        None => return HttpResponse::NotFound().json(json!({"error":"Slot not found"})),
+        Some(1) => return HttpResponse::BadRequest().json(json!({"error":"This slot is open — just book it"})),
+        _ => {}
+    }
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE slot_id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
-    if count >= 10 { return HttpResponse::Conflict().json(json!({"error":"Waitlist full"})); }
+    if count >= WAITLIST_MAX { return HttpResponse::Conflict().json(json!({"error":"Waitlist is full (max 2)"})); }
     let id = Uuid::new_v4().to_string();
     match conn.execute("INSERT INTO waitlist (id, user_id, slot_id, joined_at) VALUES (?1, ?2, ?3, ?4)", params![id, claims.sub, body.slot_id, Utc::now().to_rfc3339()]) {
         Ok(_) => HttpResponse::Ok().json(json!({"ok": true})),
         Err(e) => { if e.to_string().contains("UNIQUE") { HttpResponse::Conflict().json(json!({"error":"Already on waitlist"})) } else { HttpResponse::InternalServerError().finish() } }
     }
+}
+
+#[delete("/api/waitlist/{slot_id}")]
+async fn leave_waitlist(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
+    if let Err(resp) = require_csrf(&req, &db) { return resp; }
+    let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
+    let slot_id = path.into_inner();
+    let conn = db.lock().unwrap();
+    conn.execute("DELETE FROM waitlist WHERE user_id = ?1 AND slot_id = ?2", params![claims.sub, slot_id]).unwrap();
+    HttpResponse::Ok().json(json!({"ok": true}))
 }
 
 #[get("/api/bookings")]
@@ -784,8 +811,11 @@ async fn user_bookings(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> 
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, br.name, s.start_time FROM bookings b JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE b.user_id = ?1 ORDER BY s.start_time ASC").unwrap();
-    let bookings = stmt.query_map([claims.sub], |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: None, barber_name: row.get(8).ok(), slot_start: row.get(9).ok() })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
-    HttpResponse::Ok().json(json!({"bookings": bookings}))
+    let bookings = stmt.query_map([claims.sub.clone()], |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: None, barber_name: row.get(8).ok(), slot_start: row.get(9).ok() })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
+    // Slot ids this customer is currently waitlisted for, so the UI can enforce
+    // the "booking XOR waitlist" rule client-side too.
+    let waitlist: Vec<String> = conn.prepare("SELECT slot_id FROM waitlist WHERE user_id = ?1").unwrap().query_map([claims.sub], |row| row.get(0)).unwrap().filter_map(|v| v.ok()).collect();
+    HttpResponse::Ok().json(json!({"bookings": bookings, "waitlist": waitlist}))
 }
 
 #[get("/api/user/gdpr/export")]
@@ -1047,6 +1077,7 @@ async fn main() -> std::io::Result<()> {
             .service(reschedule_booking)
             .service(cancel_booking)
             .service(join_waitlist)
+            .service(leave_waitlist)
             .service(public_bookings)
             .service(user_bookings)
             .service(gdpr_export)

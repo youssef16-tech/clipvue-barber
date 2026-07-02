@@ -405,7 +405,7 @@
   </div>
 
   <script>
-    const state = { user: null, csrf: '', barbers: [], slots: [], bookings: [], admin: false, calendarMode: 'day', pendingSlot: null, selfieBase64: null, vapidPublicKey: '' };
+    const state = { user: null, csrf: '', barbers: [], slots: [], bookings: [], waitlist: [], admin: false, calendarMode: 'day', pendingSlot: null, selfieBase64: null, vapidPublicKey: '' };
     const qs = (id) => document.getElementById(id);
 
     const toast = (msg, isError = false) => {
@@ -538,8 +538,8 @@
       qs('adminPanel').classList.add('hidden');
       qs('userName').textContent = state.user?.name ? `, ${state.user.name}` : '';
       await Promise.all([loadBarbers(), loadPublic()]);
-      await loadSlots();
       await loadBookings();
+      await loadSlots();
     };
     // Admin-only view: the customer dashboard / privacy sections are user-specific
     // (they'd 401 without a user login), so hide them and show the admin panel.
@@ -577,19 +577,32 @@
       const label = document.createElement('div');
       label.innerHTML = `<div class="slot-time">${fmtTime(s.start_time)}</div><div class="slot-sub">${barberName(s.barber_id)}</div>`;
       row.appendChild(label);
+      // A customer holds either a booking or a waitlist spot — never both.
+      const hasBooking = state.bookings.some(b => b.status === 'confirmed');
+      const onAnyWaitlist = (state.waitlist || []).length > 0;
+      const onThisWaitlist = (state.waitlist || []).includes(s.id);
       if (s.is_available) {
         const btn = document.createElement('button');
         btn.className = 'btn btn-primary btn-sm'; btn.textContent = 'Book';
+        if (onAnyWaitlist) { btn.disabled = true; btn.title = 'Leave your waitlist spot before booking'; }
         btn.onclick = (e) => { e.stopPropagation(); openBookingModal(s); };
         row.appendChild(btn);
         row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('dragover'); });
         row.addEventListener('dragleave', () => row.classList.remove('dragover'));
         row.addEventListener('drop', (e) => { e.preventDefault(); row.classList.remove('dragover'); const bookingId = e.dataTransfer.getData('text/plain'); if (bookingId) rescheduleBooking(bookingId, s); });
+      } else if (onThisWaitlist) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-outline btn-sm'; btn.textContent = 'Leave waitlist';
+        btn.onclick = (e) => { e.stopPropagation(); leaveWaitlist(s.id); };
+        row.appendChild(btn);
       } else {
         const btn = document.createElement('button');
         btn.className = 'btn btn-outline btn-sm';
-        btn.textContent = s.waitlist_count > 0 ? `Waitlist (${s.waitlist_count})` : 'Join waitlist';
-        btn.onclick = (e) => { e.stopPropagation(); joinWaitlist(s.id); };
+        const full = s.waitlist_count >= 2;
+        if (full) { btn.textContent = 'Waitlist full'; btn.disabled = true; }
+        else if (hasBooking) { btn.textContent = `Waitlist (${s.waitlist_count})`; btn.disabled = true; btn.title = 'You already have a booking'; }
+        else if (onAnyWaitlist) { btn.textContent = `Waitlist (${s.waitlist_count})`; btn.disabled = true; btn.title = "You're already on another waitlist"; }
+        else { btn.textContent = s.waitlist_count > 0 ? `Join waitlist (${s.waitlist_count})` : 'Join waitlist'; btn.onclick = (e) => { e.stopPropagation(); joinWaitlist(s.id); }; }
         row.appendChild(btn);
       }
       return row;
@@ -682,17 +695,22 @@
         await api('/api/bookings', { method: 'POST', body: JSON.stringify({ slot_id: state.pendingSlot.id, service_name: qs('serviceSelect').value, selfie_base64: state.selfieBase64 }) });
         toast('Booking confirmed');
         qs('bookingModal').classList.add('hidden');
-        await Promise.all([loadSlots(), loadBookings(), loadPublic()]);
+        await loadBookings(); await Promise.all([loadSlots(), loadPublic()]);
       } catch (err) { toast(err.message, true); } finally { btn.disabled = false; }
     });
 
     const joinWaitlist = async (slotId) => {
-      try { await api('/api/waitlist', { method: 'POST', body: JSON.stringify({ slot_id: slotId }) }); toast('Joined waitlist'); await loadSlots(); }
+      try { await api('/api/waitlist', { method: 'POST', body: JSON.stringify({ slot_id: slotId }) }); toast('Joined waitlist'); await loadBookings(); await loadSlots(); }
+      catch (err) { toast(err.message, true); }
+    };
+
+    const leaveWaitlist = async (slotId) => {
+      try { await api(`/api/waitlist/${slotId}`, { method: 'DELETE' }); toast('Left waitlist'); await loadBookings(); await loadSlots(); }
       catch (err) { toast(err.message, true); }
     };
 
     const rescheduleBooking = async (bookingId, slot) => {
-      try { await api(`/api/bookings/${bookingId}/reschedule`, { method: 'PUT', body: JSON.stringify({ slot_id: slot.id }) }); toast('Booking rescheduled'); await Promise.all([loadSlots(), loadBookings(), loadPublic()]); }
+      try { await api(`/api/bookings/${bookingId}/reschedule`, { method: 'PUT', body: JSON.stringify({ slot_id: slot.id }) }); toast('Booking rescheduled'); await loadBookings(); await Promise.all([loadSlots(), loadPublic()]); }
       catch (err) { toast(err.message, true); }
     };
 
@@ -701,6 +719,7 @@
       setLoading(qs('bookingsList'));
       const data = await api('/api/user/bookings');
       state.bookings = data.bookings || [];
+      state.waitlist = data.waitlist || [];
       const list = qs('bookingsList'); list.innerHTML = '';
       if (!state.bookings.length) { list.innerHTML = '<div class="empty-state">No bookings yet — pick a slot to get started.</div>'; return; }
       state.bookings.forEach(b => {
@@ -717,7 +736,7 @@
     };
 
     const cancelBooking = async (id) => {
-      try { await api(`/api/bookings/${id}`, { method: 'DELETE' }); toast('Booking cancelled'); await Promise.all([loadBookings(), loadSlots(), loadPublic()]); }
+      try { await api(`/api/bookings/${id}`, { method: 'DELETE' }); toast('Booking cancelled'); await loadBookings(); await Promise.all([loadSlots(), loadPublic()]); }
       catch (err) { toast(err.message, true); }
     };
 
