@@ -275,7 +275,7 @@ fn gen_csrf() -> String {
 
 /// Simple sliding-window limiter: `limit` requests per 60s per key.
 fn check_rate_limit(key: &str, limiter: &RateLimiter, limit: usize) -> bool {
-    let mut map = limiter.lock().unwrap();
+    let mut map = limiter.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     let window = map.entry(key.to_string()).or_default();
     window.retain(|t| now.duration_since(*t) < StdDuration::from_secs(60));
@@ -291,7 +291,7 @@ fn require_csrf(req: &HttpRequest, db: &Db) -> Result<(), HttpResponse> {
     let cookie = req.cookie("csrf_token").map(|c| c.value().to_string()).unwrap_or_default();
     let token = if header.is_empty() { cookie } else { header };
     if token.is_empty() { return Err(HttpResponse::Forbidden().json(json!({"error": "CSRF token required"}))); }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let exists: i64 = conn.query_row("SELECT COUNT(*) FROM csrf_tokens WHERE token = ?1", [token], |row| row.get(0)).unwrap_or(0);
     if exists == 0 { return Err(HttpResponse::Forbidden().json(json!({"error": "Invalid CSRF token"}))); }
     Ok(())
@@ -332,7 +332,7 @@ struct PushSubBody { subscription: serde_json::Value }
 
 async fn csrf_token(req: HttpRequest, db: Data<Db>, cfg: Data<AppConfig>) -> impl Responder {
     let token = gen_csrf();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
     let _ = conn.execute("DELETE FROM csrf_tokens WHERE created_at < ?1", params![cutoff]);
     let _ = conn.execute("INSERT INTO csrf_tokens (token, user_id, created_at) VALUES (?1, ?2, ?3)", params![token, jwt_from_req(&req, &cfg.jwt_secret).map(|c| c.sub), Utc::now().to_rfc3339()]);
@@ -352,7 +352,7 @@ async fn signup(body: Json<SignupBody>, db: Data<Db>, cfg: Data<AppConfig>, req:
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let timezone = sanitise(&body.timezone.clone().unwrap_or_else(|| "UTC".to_string()));
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     match conn.execute("INSERT INTO users (id, name, phone, password_hash, timezone, gdpr_consent, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, name, phone, pass_hash, timezone, 1i32, now]) {
         Ok(_) => {}
         Err(e) => { if e.to_string().contains("UNIQUE") { return HttpResponse::Conflict().json(json!({"error":"Phone already registered"})); } error!("signup error: {e}"); return HttpResponse::InternalServerError().finish(); }
@@ -368,7 +368,7 @@ async fn login(body: Json<LoginBody>, db: Data<Db>, cfg: Data<AppConfig>, req: H
     if !check_rate_limit(&format!("login:{}", client_ip(&req)), &limiter, 5) { return HttpResponse::TooManyRequests().json(json!({"error":"Too many attempts, try again later"})); }
     let phone = sanitise(&body.phone);
     let password = body.password.trim();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = match conn.prepare("SELECT id, password_hash, name, timezone FROM users WHERE phone = ?1") { Ok(s)=>s, Err(_)=>return HttpResponse::Unauthorized().json(json!({"error":"Invalid credentials"}))};
     let user = stmt.query_row([phone], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))).ok();
     let Some((id, hash, name, timezone)) = user else { return HttpResponse::Unauthorized().json(json!({"error":"Invalid credentials"})); };
@@ -391,7 +391,7 @@ async fn logout(req: HttpRequest, db: Data<Db>) -> impl Responder {
 #[get("/api/auth/me")]
 async fn me(req: HttpRequest, db: Data<Db>, cfg: Data<AppConfig>) -> impl Responder {
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Unauthenticated"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = match conn.prepare("SELECT id, name, phone, timezone, gdpr_consent, created_at FROM users WHERE id = ?1") { Ok(s)=>s, Err(_)=>return HttpResponse::Unauthorized().json(json!({"error":"User missing"}))};
     let user = stmt.query_row([claims.sub], |row| Ok(UserRow { id: row.get(0)?, name: row.get(1)?, phone: row.get(2)?, timezone: row.get(3)?, gdpr_consent: row.get(4)?, created_at: row.get(5)? })).ok();
     match user { Some(u)=> HttpResponse::Ok().json(json!({"user": u})), None=> HttpResponse::Unauthorized().json(json!({"error":"User missing"})) }
@@ -433,7 +433,7 @@ fn require_admin(req: &HttpRequest, cfg: &AppConfig) -> Result<Claims, HttpRespo
 #[get("/api/admin/dashboard")]
 async fn admin_dashboard(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, query: Query<HashMap<String, String>>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
 
     // "Clients on <day>" is counted by appointment time (the slot), in Cairo local days,
     // so it answers "how many clients on this date" rather than "how many booked today".
@@ -462,7 +462,7 @@ async fn admin_dashboard(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, q
 #[get("/api/admin/bookings")]
 async fn admin_bookings(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, query: Query<HashMap<String, String>>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut sql = "SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, u.name, br.name, s.start_time, u.phone FROM bookings b JOIN users u ON u.id = b.user_id JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE 1=1".to_string();
     let mut params_vec: Vec<String> = Vec::new();
     if let Some(status) = query.get("status") { if !status.is_empty() { sql.push_str(" AND b.status = ?"); params_vec.push(status.clone()); } }
@@ -499,7 +499,7 @@ async fn update_admin_booking(path: Path<String>, body: Json<UpdateBookingBody>,
     let id = path.into_inner();
     let new_status = body.status.clone().map(|s| sanitise(&s));
     let new_service = body.service_name.clone().map(|s| sanitise(&s));
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(status) = new_status { conn.execute("UPDATE bookings SET status = ?1 WHERE id = ?2", params![status, id]).unwrap(); }
     if let Some(service) = new_service { conn.execute("UPDATE bookings SET service_name = ?1 WHERE id = ?2", params![service, id]).unwrap(); }
     // Full time control: admin supplies a local wall-clock time (Cairo by default); we
@@ -546,7 +546,7 @@ async fn delete_admin_booking(path: Path<String>, db: Data<Db>, req: HttpRequest
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let slot_id: Option<String> = conn.query_row("SELECT slot_id FROM bookings WHERE id = ?1", [id.clone()], |row| row.get(0)).ok();
     conn.execute("DELETE FROM bookings WHERE id = ?1", params![id]).unwrap();
     if let Some(slot_id) = slot_id { conn.execute("UPDATE slots SET is_available = 1 WHERE id = ?1", params![slot_id]).unwrap(); }
@@ -562,7 +562,7 @@ async fn create_barber(body: Json<CreateBarberBody>, db: Data<Db>, req: HttpRequ
     let photo = body.photo_base64.as_ref().map(|s| sanitise(s));
     if !valid_image(&photo) { return HttpResponse::BadRequest().json(json!({"error":"Invalid image"})); }
     let id = Uuid::new_v4().to_string();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("INSERT INTO barbers (id, name, photo_base64, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, name, photo, Utc::now().to_rfc3339()]).unwrap();
     HttpResponse::Ok().json(json!({"barber": {"id": id, "name": name}}))
 }
@@ -572,7 +572,7 @@ async fn delete_barber(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg: 
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     // Remove the barber's bookings first (bookings.barber_id has no cascade, so a
     // straight barber delete would fail the FK check when bookings exist). Slots and
     // any waitlist entries are then removed by ON DELETE CASCADE when the barber goes.
@@ -589,7 +589,7 @@ async fn create_slots(body: Json<CreateSlotBody>, db: Data<Db>, req: HttpRequest
     let start = body.start_time.trim().to_string();
     let end = body.end_time.trim().to_string();
     let interval = body.interval_minutes.max(15);
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let day = NaiveDate::parse_from_str(&body.date, "%Y-%m-%d").unwrap_or_else(|_| Utc::now().date_naive());
     let tzn: Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
     let start_dt = format!("{} {}", day.format("%Y-%m-%d"), start);
@@ -614,7 +614,7 @@ async fn create_slots(body: Json<CreateSlotBody>, db: Data<Db>, req: HttpRequest
 #[get("/api/admin/slots")]
 async fn admin_list_slots(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>, query: Query<SlotsQuery>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut sql = "SELECT s.id, s.barber_id, s.start_time, s.end_time, s.is_available, br.name FROM slots s JOIN barbers br ON br.id = s.barber_id WHERE 1=1".to_string();
     let mut params_vec: Vec<String> = Vec::new();
     if let Some(date) = &query.date { if !date.is_empty() { sql.push_str(" AND s.start_time LIKE ?"); params_vec.push(format!("{}%", date)); } }
@@ -631,7 +631,7 @@ async fn update_slot(path: Path<String>, body: Json<UpdateSlotBody>, db: Data<Db
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let id = path.into_inner();
     let available = body.is_available.unwrap_or(true);
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("UPDATE slots SET is_available = ?1 WHERE id = ?2", params![if available { 1i32 } else { 0i32 }, id]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
 }
@@ -641,7 +641,7 @@ async fn delete_slot(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg: Da
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("DELETE FROM slots WHERE id = ?1", params![id]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
 }
@@ -649,7 +649,7 @@ async fn delete_slot(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg: Da
 #[get("/api/admin/export/csv")]
 async fn export_csv(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     if let Err(resp) = require_admin(&req, &cfg) { return resp; }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare("SELECT b.id, u.name, br.name, s.start_time, b.service_name, b.status FROM bookings b JOIN users u ON u.id = b.user_id JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id ORDER BY b.created_at DESC").unwrap();
     let mut w = Writer::from_writer(Vec::new());
     w.write_record(["id", "customer", "barber", "time", "service", "status"]).unwrap();
@@ -662,7 +662,7 @@ async fn export_csv(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> imp
 
 #[get("/api/barbers")]
 async fn list_barbers(db: Data<Db>) -> impl Responder {
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare("SELECT id, name, photo_base64, created_at FROM barbers ORDER BY name").unwrap();
     let barbers = stmt.query_map([], |row| Ok(BarberRow { id: row.get(0)?, name: row.get(1)?, photo_base64: row.get(2).ok(), created_at: row.get(3)? })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
     HttpResponse::Ok().json(json!({"barbers": barbers}))
@@ -670,7 +670,7 @@ async fn list_barbers(db: Data<Db>) -> impl Responder {
 
 #[get("/api/slots")]
 async fn list_slots(db: Data<Db>, query: Query<SlotsQuery>) -> impl Responder {
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let include_unavailable = query.include_unavailable.as_deref() == Some("1");
     let mut sql = "SELECT id, barber_id, start_time, end_time, is_available FROM slots WHERE 1=1".to_string();
     if !include_unavailable { sql.push_str(" AND is_available = 1"); }
@@ -694,7 +694,7 @@ async fn create_booking(body: Json<CreateBookingBody>, db: Data<Db>, req: HttpRe
     let service = sanitise(&body.service_name);
     if service.is_empty() { return HttpResponse::BadRequest().json(json!({"error":"Service required"})); }
     if !valid_image(&body.selfie_base64) { return HttpResponse::BadRequest().json(json!({"error":"Invalid image"})); }
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     // A customer can't hold a booking and a waitlist spot at the same time.
     let on_waitlist: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE user_id = ?1", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
     if on_waitlist > 0 { return HttpResponse::Conflict().json(json!({"error":"You're on a waitlist — leave it before booking a slot"})); }
@@ -714,7 +714,7 @@ async fn reschedule_booking(path: Path<String>, body: Json<RescheduleBody>, db: 
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let booking: Option<(String, String, String)> = conn.query_row("SELECT slot_id, user_id, barber_id FROM bookings WHERE id = ?1", [id.clone()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).ok();
     let Some((old_slot_id, user_id, barber_id)) = booking else { return HttpResponse::NotFound().json(json!({"error":"Booking not found"})); };
     if user_id != claims.sub { return HttpResponse::Forbidden().json(json!({"error":"Not your booking"})); }
@@ -732,7 +732,7 @@ async fn cancel_booking(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg:
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let booking: Option<(String, String)> = conn.query_row("SELECT slot_id, user_id FROM bookings WHERE id = ?1", [id.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).ok();
     let Some((slot_id, user_id)) = booking else { return HttpResponse::NotFound().json(json!({"error":"Booking not found"})); };
     if user_id != claims.sub { return HttpResponse::Forbidden().json(json!({"error":"Not your booking"})); }
@@ -766,7 +766,7 @@ const WAITLIST_MAX: i64 = 2;
 async fn join_waitlist(body: Json<WaitlistBody>, db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     // Can't wait for a slot while already holding a confirmed booking.
     let has_booking: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE user_id = ?1 AND status = 'confirmed'", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
     if has_booking > 0 { return HttpResponse::Conflict().json(json!({"error":"You already have a booking — cancel it before joining a waitlist"})); }
@@ -793,14 +793,14 @@ async fn leave_waitlist(path: Path<String>, db: Data<Db>, req: HttpRequest, cfg:
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let slot_id = path.into_inner();
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("DELETE FROM waitlist WHERE user_id = ?1 AND slot_id = ?2", params![claims.sub, slot_id]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
 }
 
 #[get("/api/bookings")]
 async fn public_bookings(db: Data<Db>) -> impl Responder {
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare("SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, u.name, br.name, s.start_time FROM bookings b JOIN users u ON u.id = b.user_id JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id ORDER BY s.start_time ASC").unwrap();
     let bookings = stmt.query_map([], |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: row.get(8).ok(), barber_name: row.get(9).ok(), slot_start: row.get(10).ok() })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
     HttpResponse::Ok().json(json!({"bookings": bookings}))
@@ -809,7 +809,7 @@ async fn public_bookings(db: Data<Db>) -> impl Responder {
 #[get("/api/user/bookings")]
 async fn user_bookings(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare("SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, br.name, s.start_time FROM bookings b JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE b.user_id = ?1 ORDER BY s.start_time ASC").unwrap();
     let bookings = stmt.query_map([claims.sub.clone()], |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: None, barber_name: row.get(8).ok(), slot_start: row.get(9).ok() })).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>();
     // Slot ids this customer is currently waitlisted for, so the UI can enforce
@@ -821,7 +821,7 @@ async fn user_bookings(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> 
 #[get("/api/user/gdpr/export")]
 async fn gdpr_export(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let user: Option<UserRow> = conn.query_row("SELECT id, name, phone, timezone, gdpr_consent, created_at FROM users WHERE id = ?1", [claims.sub.clone()], |row| Ok(UserRow { id: row.get(0)?, name: row.get(1)?, phone: row.get(2)?, timezone: row.get(3)?, gdpr_consent: row.get(4)?, created_at: row.get(5)? })).ok();
     let bookings: Vec<BookingRow> = conn.prepare("SELECT b.id, b.user_id, b.barber_id, b.slot_id, b.service_name, b.selfie_base64, b.status, b.created_at, br.name, s.start_time FROM bookings b JOIN barbers br ON br.id = b.barber_id JOIN slots s ON s.id = b.slot_id WHERE b.user_id = ?1").unwrap().query_map([claims.sub], |row| Ok(BookingRow { id: row.get(0)?, user_id: row.get(1)?, barber_id: row.get(2)?, slot_id: row.get(3)?, service_name: row.get(4)?, selfie_base64: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, user_name: None, barber_name: row.get(8).ok(), slot_start: row.get(9).ok() })).unwrap().filter_map(|v| v.ok()).collect();
     HttpResponse::Ok().insert_header((header::CONTENT_DISPOSITION, "attachment; filename=\"clipvue-my-data.json\"")).json(json!({"user": user, "bookings": bookings}))
@@ -831,7 +831,7 @@ async fn gdpr_export(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> im
 async fn gdpr_delete(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("DELETE FROM users WHERE id = ?1", [claims.sub]).unwrap();
     let cookie = Cookie::build("token", "").path("/").http_only(true).same_site(SameSite::Strict).max_age(CookieDuration::seconds(0)).finish();
     HttpResponse::Ok().cookie(cookie).json(json!({"ok": true}))
@@ -846,14 +846,14 @@ async fn vapid_public_key(cfg: Data<AppConfig>) -> impl Responder {
 async fn push_subscribe(body: Json<PushSubBody>, db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("UPDATE users SET push_subscription = ?1 WHERE id = ?2", params![body.subscription.to_string(), claims.sub]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
 }
 
 #[post("/api/analytics/pageview")]
 async fn analytics_pageview(body: Json<AnalyticsBody>, db: Data<Db>, req: HttpRequest) -> impl Responder {
-    let conn = db.lock().unwrap();
+    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
     let ip = client_ip(&req);
     conn.execute("INSERT INTO analytics (path, ip, user_agent, created_at) VALUES (?1, ?2, ?3, ?4)", params![sanitise(&body.path), ip, req.headers().get("user-agent").and_then(|h| h.to_str().ok()).unwrap_or_default(), Utc::now().to_rfc3339()]).unwrap();
     HttpResponse::Ok().json(json!({"ok": true}))
@@ -997,7 +997,7 @@ async fn reminder_loop(db: Data<Db>, cfg: Data<AppConfig>) {
         ticker.tick().await;
         let now = Utc::now();
         let rows = {
-            let conn = db.lock().unwrap();
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare("SELECT b.id, s.start_time, u.name, u.phone, u.push_subscription FROM bookings b JOIN slots s ON s.id = b.slot_id JOIN users u ON u.id = b.user_id WHERE b.status = 'confirmed' AND b.reminder_sent = 0").unwrap();
             stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?))).unwrap().filter_map(|v| v.ok()).collect::<Vec<_>>()
         };
@@ -1007,7 +1007,7 @@ async fn reminder_loop(db: Data<Db>, cfg: Data<AppConfig>) {
                 if diff.num_seconds() > 0 && diff.num_seconds() <= 3600 {
                     send_mail(&cfg, &format!("{}@clipvue.com", phone), "7gozati reminder", &format!("Hello {user_name}, your appointment starts in under an hour.")).await;
                     if let Some(sub) = push_sub { if !sub.is_empty() { send_push(&cfg, &sub, "7gozati reminder", "Your appointment starts in under an hour.").await; } }
-                    let conn = db.lock().unwrap();
+                    let conn = db.lock().unwrap_or_else(|e| e.into_inner());
                     conn.execute("UPDATE bookings SET reminder_sent = 1 WHERE id = ?1", params![booking_id]).unwrap();
                 }
             }
