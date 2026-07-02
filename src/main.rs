@@ -1001,7 +1001,11 @@ async fn main() -> std::io::Result<()> {
     let cfg = Data::new(cfg_val);
     let rate_limiter = Data::new(Arc::new(Mutex::new(HashMap::<String, Vec<Instant>>::new())));
 
-    let governor_conf = GovernorConfigBuilder::default().per_second(100).burst_size(100).finish().unwrap();
+    // Global anti-abuse throttle. In actix-governor the period is the interval to replenish ONE
+    // request slot, so per_millisecond(100) = ~10 req/s sustained (~600/min) with a 200-request
+    // burst. This is generous enough for the SPA's per-page request fan-out while still capping
+    // floods. (Brute-force on auth is handled separately by the 5/min limiter on login/signup.)
+    let governor_conf = GovernorConfigBuilder::default().per_millisecond(100).burst_size(200).finish().unwrap();
     let db_for_task = db.clone();
     let cfg_for_task = cfg.clone();
     tokio::spawn(async move { reminder_loop(db_for_task, cfg_for_task).await; });

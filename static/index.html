@@ -147,6 +147,9 @@
     .booking-card.dragging { opacity: .4 }
 
     .avatar { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; background: var(--gradient); display: inline-flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: .8rem; flex-shrink: 0 }
+    /* Larger, portrait-friendly face in the public bookings table so the selfie is clearly visible. */
+    #publicBookingsBody td:first-child { width: 84px }
+    #publicBookingsBody .avatar { width: 72px; height: 72px; border-radius: 14px; font-size: 1.25rem }
 
     table.data-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; font-size: .88rem }
     table.data-table th, table.data-table td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle }
@@ -238,7 +241,7 @@
         <form id="authForm">
           <div id="authModeText" style="margin-bottom:14px;font-weight:700;font-size:1.1rem">Sign up</div>
           <div id="signupFields">
-            <div class="form-group"><label>Name</label><input id="name" placeholder="Avery Stone" autocomplete="name" /></div>
+            <div class="form-group"><label>Name</label><input id="name" placeholder="Enter your name" autocomplete="name" /></div>
           </div>
           <div class="form-group"><label>Phone</label><input id="phone" placeholder="+20 100 000 0000" autocomplete="tel" /></div>
           <div class="form-group"><label>Password</label><input id="password" type="password" placeholder="••••••••" autocomplete="current-password" /></div>
