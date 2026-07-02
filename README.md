@@ -10,9 +10,9 @@ Actix Web, SQLite, and a single-file installable PWA frontend. Egypt-only
 cargo run
 ```
 
-Then open <http://localhost:8080>. In dev mode the app boots with insecure
-defaults (admin `admin` / `admin123`, a placeholder JWT secret) — fine locally,
-never in production (see below).
+Then open <http://localhost:8080>. In dev mode the app boots with built-in
+defaults (admin `elrayes` / `7ooda3M@$&*`, a placeholder JWT secret) — fine
+locally, but always set your own secrets in production (see below).
 
 ## Docker
 
@@ -44,9 +44,9 @@ keeps the SQLite database across deploys.
 `DEV_MODE=false` (set in fly.toml) makes the app **refuse to boot** without these:
 ```bash
 fly secrets set JWT_SECRET="$(openssl rand -hex 32)"
-fly secrets set ADMIN_PASS="a-strong-admin-password"
-# optional:
-fly secrets set ADMIN_USER="admin"
+# Single-quote the password so the shell doesn't interpret $ & * etc.
+fly secrets set ADMIN_PASS='7ooda3M@$&*'
+fly secrets set ADMIN_USER='elrayes'
 ```
 Optional email reminders (leave unset to disable — the app no-ops without them):
 ```bash
