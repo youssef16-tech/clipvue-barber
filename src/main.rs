@@ -698,6 +698,10 @@ async fn create_booking(body: Json<CreateBookingBody>, db: Data<Db>, req: HttpRe
     // A customer can't hold a booking and a waitlist spot at the same time.
     let on_waitlist: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE user_id = ?1", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
     if on_waitlist > 0 { return HttpResponse::Conflict().json(json!({"error":"You're on a waitlist — leave it before booking a slot"})); }
+    // One upcoming booking per customer; past visits stay 'confirmed' so the check must be time-bound.
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let upcoming: i64 = conn.query_row("SELECT COUNT(*) FROM bookings b JOIN slots s ON b.slot_id = s.id WHERE b.user_id = ?1 AND b.status = 'confirmed' AND s.start_time > ?2", params![claims.sub, now], |row| row.get(0)).unwrap_or(0);
+    if upcoming > 0 { return HttpResponse::Conflict().json(json!({"error":"You already have an upcoming booking — cancel or reschedule it first"})); }
     let slot_exists: i64 = conn.query_row("SELECT COUNT(*) FROM slots WHERE id = ?1 AND is_available = 1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
     if slot_exists == 0 { return HttpResponse::Conflict().json(json!({"error":"Slot unavailable"})); }
     let already: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE slot_id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
@@ -767,8 +771,9 @@ async fn join_waitlist(body: Json<WaitlistBody>, db: Data<Db>, req: HttpRequest,
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let conn = db.lock().unwrap_or_else(|e| e.into_inner());
-    // Can't wait for a slot while already holding a confirmed booking.
-    let has_booking: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE user_id = ?1 AND status = 'confirmed'", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
+    // Can't wait for a slot while already holding an upcoming booking (past visits stay 'confirmed', so time-bound).
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let has_booking: i64 = conn.query_row("SELECT COUNT(*) FROM bookings b JOIN slots s ON b.slot_id = s.id WHERE b.user_id = ?1 AND b.status = 'confirmed' AND s.start_time > ?2", params![claims.sub, now], |row| row.get(0)).unwrap_or(0);
     if has_booking > 0 { return HttpResponse::Conflict().json(json!({"error":"You already have a booking — cancel it before joining a waitlist"})); }
     // Only one waitlist spot per customer at a time.
     let mine: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE user_id = ?1", [claims.sub.clone()], |row| row.get(0)).unwrap_or(0);
