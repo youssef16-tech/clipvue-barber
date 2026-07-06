@@ -155,6 +155,12 @@
     #publicBookingsBody td:first-child { width: 84px }
     #publicBookingsBody .avatar { width: 72px; height: 72px; border-radius: 14px; font-size: 1.25rem }
 
+    /* dd/mm/yyyy overlay for date inputs — native text hidden, our formatted text shown instead. */
+    .date-wrap { position: relative }
+    .date-wrap input[type="date"] { color: transparent }
+    .date-wrap input[type="date"]::-webkit-datetime-edit { color: transparent }
+    .date-wrap .date-display { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text); font-size: .92rem }
+
     /* Card-style rows: each booking floats as its own rounded card, matching the rest of the UI. */
     table.data-table { width: 100%; border-collapse: separate; border-spacing: 0 10px; font-size: .88rem }
     table.data-table th { padding: 2px 14px; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; text-align: left }
@@ -450,6 +456,20 @@
     // 7gozati operates in Egypt only — all times are handled in Cairo local time.
     const TZ = 'Africa/Cairo';
     const userTz = () => TZ;
+    // Browsers draw <input type=date> in the OS locale (often mm/dd/yyyy). Egypt reads dd/mm/yyyy,
+    // so we hide the native text and overlay our own — the native calendar picker still opens.
+    const dateDisplays = [];
+    const egyptDate = (input) => {
+      const wrap = document.createElement('div'); wrap.className = 'date-wrap';
+      input.parentNode.insertBefore(wrap, input); wrap.appendChild(input);
+      const disp = document.createElement('span'); disp.className = 'date-display';
+      wrap.appendChild(disp);
+      const update = () => { disp.textContent = input.value ? input.value.split('-').reverse().join('/') : 'dd/mm/yyyy'; };
+      input.addEventListener('change', update); input.addEventListener('input', update);
+      dateDisplays.push(update); update();
+    };
+    const refreshDateDisplays = () => dateDisplays.forEach(f => f());
+
     // Egypt reads dates as day/month/year — en-GB gives dd/mm/yyyy while keeping the 12-hour clock.
     const fmtTime = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: userTz() }).format(new Date(iso)).replace(' am', ' AM').replace(' pm', ' PM'); } catch { return iso; } };
     // UTC ISO -> "YYYY-MM-DDTHH:MM" wall-clock in Cairo, for prefilling datetime-local inputs.
@@ -814,6 +834,7 @@
     const loadAdminData = async () => {
       const date = qs('dashDate').value || todayCairo();
       qs('dashDate').value = date;
+      refreshDateDisplays();
       const stats = await api(`/api/admin/dashboard?date=${date}`);
       qs('adminStats').innerHTML = `
         <div class="stat-box" style="grid-column:1/-1"><div class="num">${stats.clients_on_date}</div><div class="lbl">Clients on ${dayLabel(stats.date)}</div></div>
@@ -938,7 +959,9 @@
       initTheme();
       setAuthMode('signup');
       const today = todayCairo();
+      ['dateFilter', 'adminDate', 'dashDate'].forEach(id => egyptDate(qs(id)));
       qs('dateFilter').value = today; qs('adminDate').value = today; qs('dashDate').value = today;
+      refreshDateDisplays();
       try { await getCsrf(); } catch {}
       // Restore whichever session is active: customer first, then admin.
       try {
