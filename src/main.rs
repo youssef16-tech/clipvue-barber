@@ -872,7 +872,25 @@ async fn gdpr_delete(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> im
     if let Err(resp) = require_csrf(&req, &db) { return resp; }
     let Some(claims) = jwt_from_req(&req, &cfg.jwt_secret) else { return HttpResponse::Unauthorized().json(json!({"error":"Login required"})); };
     let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+    // Collect the slots this user's confirmed bookings hold BEFORE the user row (and its
+    // cascading bookings) disappear, so they don't stay blocked forever after deletion.
+    let slot_ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT slot_id FROM bookings WHERE user_id = ?1 AND status = 'confirmed'").unwrap();
+        let ids: Vec<String> = stmt.query_map([claims.sub.clone()], |row| row.get(0)).unwrap().filter_map(|v| v.ok()).collect();
+        ids
+    };
     conn.execute("DELETE FROM users WHERE id = ?1", [claims.sub]).unwrap();
+    for slot_id in slot_ids {
+        // Same auto-fill as a manual cancellation: first waitlisted customer inherits the slot.
+        let waitlisted: Option<(String, String)> = conn.query_row("SELECT id, user_id FROM waitlist WHERE slot_id = ?1 ORDER BY joined_at ASC LIMIT 1", [slot_id.clone()], |row| Ok((row.get(0)?, row.get(1)?))).ok();
+        if let Some((wait_id, wait_user)) = waitlisted {
+            conn.execute("DELETE FROM waitlist WHERE id = ?1", params![wait_id]).unwrap();
+            let barber_id: String = conn.query_row("SELECT barber_id FROM slots WHERE id = ?1", [slot_id.clone()], |row| row.get(0)).unwrap_or_default();
+            conn.execute("INSERT INTO bookings (id, user_id, barber_id, slot_id, service_name, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![Uuid::new_v4().to_string(), wait_user, barber_id, slot_id, "Auto-filled", "confirmed", Utc::now().to_rfc3339()]).unwrap();
+        } else {
+            conn.execute("UPDATE slots SET is_available = 1 WHERE id = ?1", params![slot_id]).unwrap();
+        }
+    }
     let cookie = Cookie::build("token", "").path("/").http_only(true).same_site(SameSite::Strict).max_age(CookieDuration::seconds(0)).finish();
     HttpResponse::Ok().cookie(cookie).json(json!({"ok": true}))
 }

@@ -24,6 +24,10 @@
       --gradient: linear-gradient(135deg, var(--purple), var(--blue));
     }
 
+    /* Native controls (date picker calendar, selects) follow the app theme instead of always being white. */
+    html { color-scheme: light }
+    html[data-theme="dark"] { color-scheme: dark }
+
     [data-theme="dark"] {
       --bg: #0f1021;
       --card: #17192e;
@@ -151,11 +155,14 @@
     #publicBookingsBody td:first-child { width: 84px }
     #publicBookingsBody .avatar { width: 72px; height: 72px; border-radius: 14px; font-size: 1.25rem }
 
-    table.data-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; font-size: .88rem }
-    table.data-table th, table.data-table td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle }
-    table.data-table th { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 700 }
-    table.data-table tbody tr { animation: slideIn .3s ease }
-    table.data-table tbody tr:hover { background: rgba(132,94,194,.05) }
+    /* Card-style rows: each booking floats as its own rounded card, matching the rest of the UI. */
+    table.data-table { width: 100%; border-collapse: separate; border-spacing: 0 10px; font-size: .88rem }
+    table.data-table th { padding: 2px 14px; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; text-align: left }
+    table.data-table td { padding: 14px; background: var(--card); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle }
+    table.data-table td:first-child { border-left: 1px solid var(--border); border-radius: 14px 0 0 14px }
+    table.data-table td:last-child { border-right: 1px solid var(--border); border-radius: 0 14px 14px 0 }
+    table.data-table tbody tr { animation: slideIn .3s ease; transition: transform .15s ease }
+    table.data-table tbody tr:hover td { background: rgba(132,94,194,.08); border-color: rgba(132,94,194,.4) }
 
     .tag { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(44, 115, 210, .12); color: var(--blue); font-size: .74rem; font-weight: 700 }
     .tag.purple { background: rgba(132,94,194,.14); color: var(--purple) }
@@ -385,7 +392,8 @@
       <div class="form-group">
         <label>Selfie (optional)</label>
         <div class="selfie-preview" id="selfiePreview"><span style="color:var(--muted);font-size:.8rem">No photo selected</span></div>
-        <input id="selfieInput" type="file" accept="image/png,image/jpeg" />
+        <input id="selfieInput" type="file" accept="image/png,image/jpeg" capture="user" hidden />
+        <button type="button" class="btn btn-outline btn-block" id="takePicBtn">&#128248; Take a pic</button>
       </div>
       <button class="btn btn-primary btn-block" id="confirmBookingBtn">Confirm booking</button>
     </div>
@@ -442,7 +450,8 @@
     // 7gozati operates in Egypt only — all times are handled in Cairo local time.
     const TZ = 'Africa/Cairo';
     const userTz = () => TZ;
-    const fmtTime = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: userTz() }).format(new Date(iso)); } catch { return iso; } };
+    // Egypt reads dates as day/month/year — en-GB gives dd/mm/yyyy while keeping the 12-hour clock.
+    const fmtTime = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: userTz() }).format(new Date(iso)).replace(' am', ' AM').replace(' pm', ' PM'); } catch { return iso; } };
     // UTC ISO -> "YYYY-MM-DDTHH:MM" wall-clock in Cairo, for prefilling datetime-local inputs.
     const toLocalInput = (iso) => {
       if (!iso) return '';
@@ -633,7 +642,7 @@
         days.forEach(day => {
           const col = document.createElement('div'); col.className = 'day-col';
           const daySlots = state.slots.filter(s => s.start_time.slice(0, 10) === day).sort((a, b) => a.start_time.localeCompare(b.start_time));
-          col.innerHTML = `<h5>${new Date(day + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}</h5>`;
+          col.innerHTML = `<h5>${new Date(day + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit' })}</h5>`;
           if (!daySlots.length) { col.innerHTML += '<div class="empty-state" style="padding:8px">—</div>'; }
           daySlots.forEach(s => col.appendChild(slotRow(s)));
           gridEl.appendChild(col);
@@ -652,6 +661,7 @@
       qs('bookingModalTime').textContent = `${barberName(slot.barber_id)} · ${fmtTime(slot.start_time)}`;
       qs('selfiePreview').innerHTML = '<span style="color:var(--muted);font-size:.8rem">No photo selected</span>';
       qs('selfieInput').value = '';
+      qs('takePicBtn').innerHTML = '&#128248; Take a pic';
       qs('bookingModal').classList.remove('hidden');
     };
     qs('closeBookingModal').addEventListener('click', () => qs('bookingModal').classList.add('hidden'));
@@ -679,12 +689,14 @@
       reader.readAsDataURL(file);
     });
 
+    qs('takePicBtn').addEventListener('click', () => qs('selfieInput').click());
     qs('selfieInput').addEventListener('change', async (e) => {
       const file = e.target.files[0]; if (!file) return;
       try {
         const dataUrl = await fileToCompressedBase64(file);
         state.selfieBase64 = dataUrl.split(',')[1];
         qs('selfiePreview').innerHTML = `<img src="${dataUrl}" alt="Selfie preview" />`;
+        qs('takePicBtn').innerHTML = '&#128248; Retake';
       } catch (err) { toast(err.message, true); e.target.value = ''; }
     });
 
@@ -798,7 +810,7 @@
     });
 
     // ---------- Admin ----------
-    const dayLabel = (ymd) => { try { return new Date(ymd + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch { return ymd; } };
+    const dayLabel = (ymd) => { try { return new Date(ymd + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit' }); } catch { return ymd; } };
     const loadAdminData = async () => {
       const date = qs('dashDate').value || todayCairo();
       qs('dashDate').value = date;
