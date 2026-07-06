@@ -336,7 +336,8 @@ async fn csrf_token(req: HttpRequest, db: Data<Db>, cfg: Data<AppConfig>) -> imp
     let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
     let _ = conn.execute("DELETE FROM csrf_tokens WHERE created_at < ?1", params![cutoff]);
     let _ = conn.execute("INSERT INTO csrf_tokens (token, user_id, created_at) VALUES (?1, ?2, ?3)", params![token, jwt_from_req(&req, &cfg.jwt_secret).map(|c| c.sub), Utc::now().to_rfc3339()]);
-    let cookie = Cookie::build("csrf_token", token.clone()).path("/").http_only(false).same_site(SameSite::Strict).max_age(CookieDuration::hours(1)).finish();
+    let mut cookie = Cookie::build("csrf_token", token.clone()).path("/").http_only(false).same_site(SameSite::Strict).max_age(CookieDuration::hours(1)).finish();
+    if !cfg.dev_mode { cookie.set_secure(true); }
     HttpResponse::Ok().cookie(cookie).json(json!({"csrf_token": token}))
 }
 
@@ -658,6 +659,30 @@ async fn export_csv(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> imp
     }
     let bytes = String::from_utf8(w.into_inner().unwrap()).unwrap();
     HttpResponse::Ok().insert_header((header::CONTENT_TYPE, "text/csv; charset=utf-8")).insert_header((header::CONTENT_DISPOSITION, "attachment; filename=\"clipvue-bookings.csv\"")).body(bytes)
+}
+
+#[get("/api/admin/backup")]
+async fn backup_db(db: Data<Db>, req: HttpRequest, cfg: Data<AppConfig>) -> impl Responder {
+    if let Err(resp) = require_admin(&req, &cfg) { return resp; }
+    // VACUUM INTO writes a consistent snapshot even while the app is serving traffic,
+    // unlike copying the raw db file (which can catch a half-applied transaction).
+    let tmp = std::env::temp_dir().join(format!("clipvue-backup-{}.db", Uuid::new_v4()));
+    let tmp_str = tmp.to_string_lossy().replace('\'', "''");
+    {
+        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = conn.execute_batch(&format!("VACUUM INTO '{}'", tmp_str)) {
+            return HttpResponse::InternalServerError().json(json!({"error": format!("backup failed: {e}")}));
+        }
+    }
+    let bytes = match std::fs::read(&tmp) {
+        Ok(b) => b,
+        Err(e) => { let _ = std::fs::remove_file(&tmp); return HttpResponse::InternalServerError().json(json!({"error": format!("backup read failed: {e}")})); }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    HttpResponse::Ok()
+        .insert_header((header::CONTENT_TYPE, "application/octet-stream"))
+        .insert_header((header::CONTENT_DISPOSITION, format!("attachment; filename=\"clipvue-{}.db\"", Utc::now().format("%Y-%m-%d"))))
+        .body(bytes)
 }
 
 #[get("/api/barbers")]
@@ -1088,6 +1113,7 @@ async fn main() -> std::io::Result<()> {
             .service(update_slot)
             .service(delete_slot)
             .service(export_csv)
+            .service(backup_db)
             .service(list_barbers)
             .service(list_slots)
             .service(create_booking)
