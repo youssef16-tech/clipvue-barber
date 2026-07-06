@@ -612,7 +612,8 @@
       if (!barber) return;
       setLoading(qs('slotsList'));
       const data = await api(`/api/slots?barber_id=${barber}&include_unavailable=1`);
-      state.slots = data.slots || [];
+      // Past slots can't be booked or waitlisted (server rejects them too) — don't show them.
+      state.slots = (data.slots || []).filter(s => new Date(s.start_time) > new Date());
       renderSlots();
     };
 

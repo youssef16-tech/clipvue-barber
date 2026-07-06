@@ -601,9 +601,12 @@ async fn create_slots(body: Json<CreateSlotBody>, db: Data<Db>, req: HttpRequest
     let end_utc = tzn.from_local_datetime(&end_naive).single().unwrap_or_else(|| Utc::now().with_timezone(&tzn)).with_timezone(&Utc).naive_utc();
     let mut cursor = start_utc;
     let mut created = 0i32;
+    let now_utc = Utc::now().naive_utc();
     while cursor < end_utc {
         let next = cursor + chrono::Duration::minutes(interval);
         if next > end_utc { break; }
+        // Never create slots that start in the past — they'd be unbookable dead weight.
+        if cursor <= now_utc { cursor = next; continue; }
         let slot_id = Uuid::new_v4().to_string();
         conn.execute("INSERT INTO slots (id, barber_id, start_time, end_time, is_available, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![slot_id, body.barber_id, cursor.format("%Y-%m-%dT%H:%M:%SZ").to_string(), next.format("%Y-%m-%dT%H:%M:%SZ").to_string(), 1i32, Utc::now().to_rfc3339()]).unwrap();
         cursor = next;
@@ -729,6 +732,8 @@ async fn create_booking(body: Json<CreateBookingBody>, db: Data<Db>, req: HttpRe
     if upcoming > 0 { return HttpResponse::Conflict().json(json!({"error":"You already have an upcoming booking — cancel or reschedule it first"})); }
     let slot_exists: i64 = conn.query_row("SELECT COUNT(*) FROM slots WHERE id = ?1 AND is_available = 1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
     if slot_exists == 0 { return HttpResponse::Conflict().json(json!({"error":"Slot unavailable"})); }
+    let slot_start: String = conn.query_row("SELECT start_time FROM slots WHERE id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or_default();
+    if slot_start <= now { return HttpResponse::Conflict().json(json!({"error":"This time has already passed"})); }
     let already: i64 = conn.query_row("SELECT COUNT(*) FROM bookings WHERE slot_id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
     if already > 0 { return HttpResponse::Conflict().json(json!({"error":"Slot already booked"})); }
     let barber_id: String = conn.query_row("SELECT barber_id FROM slots WHERE id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or_default();
@@ -750,6 +755,9 @@ async fn reschedule_booking(path: Path<String>, body: Json<RescheduleBody>, db: 
     let new_slot_barber: Option<String> = conn.query_row("SELECT barber_id FROM slots WHERE id = ?1 AND is_available = 1", [body.slot_id.clone()], |row| row.get(0)).ok();
     let Some(new_slot_barber) = new_slot_barber else { return HttpResponse::Conflict().json(json!({"error":"Slot unavailable"})); };
     if new_slot_barber != barber_id { return HttpResponse::BadRequest().json(json!({"error":"Can only reschedule within the same barber"})); }
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let new_start: String = conn.query_row("SELECT start_time FROM slots WHERE id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or_default();
+    if new_start <= now { return HttpResponse::Conflict().json(json!({"error":"This time has already passed"})); }
     conn.execute("UPDATE bookings SET slot_id = ?1, reminder_sent = 0 WHERE id = ?2", params![body.slot_id, id]).unwrap();
     conn.execute("UPDATE slots SET is_available = 0 WHERE id = ?1", params![body.slot_id]).unwrap();
     conn.execute("UPDATE slots SET is_available = 1 WHERE id = ?1", params![old_slot_id]).unwrap();
@@ -809,6 +817,8 @@ async fn join_waitlist(body: Json<WaitlistBody>, db: Data<Db>, req: HttpRequest,
         Some(1) => return HttpResponse::BadRequest().json(json!({"error":"This slot is open — just book it"})),
         _ => {}
     }
+    let slot_start: String = conn.query_row("SELECT start_time FROM slots WHERE id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or_default();
+    if slot_start <= now { return HttpResponse::Conflict().json(json!({"error":"This time has already passed"})); }
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM waitlist WHERE slot_id = ?1", [body.slot_id.clone()], |row| row.get(0)).unwrap_or(0);
     if count >= WAITLIST_MAX { return HttpResponse::Conflict().json(json!({"error":"Waitlist is full (max 2)"})); }
     let id = Uuid::new_v4().to_string();
