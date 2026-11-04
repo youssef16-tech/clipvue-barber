@@ -56,11 +56,11 @@ struct AppConfig {
 
 impl AppConfig {
     fn from_env() -> Self {
-        let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| "7ooda3M@$&*".to_string());
+        let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| "dev-only-change-me".to_string());
         let admin_pass_hash = hash(&admin_pass, DEFAULT_COST).expect("bcrypt hash failed");
         Self {
             jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "clipvue-secret-change-in-production-32chars".to_string()),
-            admin_user: std::env::var("ADMIN_USER").unwrap_or_else(|_| "elrayes".to_string()),
+            admin_user: std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".to_string()),
             admin_pass_hash,
             smtp_host: std::env::var("SMTP_HOST").unwrap_or_default(),
             smtp_port: std::env::var("SMTP_PORT").unwrap_or_else(|_| "587".to_string()).parse().unwrap_or(587),

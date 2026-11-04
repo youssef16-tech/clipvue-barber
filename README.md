@@ -1,8 +1,15 @@
-# 7gozati
+# ClipVue (7gozati)
 
-7gozati is a low-cost, secure, premium barber booking experience built with Rust,
+ClipVue is a low-cost, secure, premium barber booking experience built with Rust,
 Actix Web, SQLite, and a single-file installable PWA frontend. Egypt-only
 (all times are handled in `Africa/Cairo`).
+
+## DevOps side of this project
+
+- **Docker** — multi-stage `Dockerfile` + `docker-compose.yml` for a one-command local run
+- **Deploy** — Fly.io config (`fly.toml`) with a persistent volume for SQLite and secrets kept out of the code
+- **CI/CD** — GitHub Actions workflow in `.github/workflows/deploy.yml`
+- **Ops scripts** — `scripts/backup-db.sh` for database backups
 
 ## Run locally
 
@@ -11,7 +18,7 @@ cargo run
 ```
 
 Then open <http://localhost:8080>. In dev mode the app boots with built-in
-defaults (admin `elrayes` / `7ooda3M@$&*`, a placeholder JWT secret) — fine
+defaults (a dev-only admin login and a placeholder JWT secret) — fine
 locally, but always set your own secrets in production (see below).
 
 ## Docker
@@ -45,8 +52,8 @@ keeps the SQLite database across deploys.
 ```bash
 fly secrets set JWT_SECRET="$(openssl rand -hex 32)"
 # Single-quote the password so the shell doesn't interpret $ & * etc.
-fly secrets set ADMIN_PASS='7ooda3M@$&*'
-fly secrets set ADMIN_USER='elrayes'
+fly secrets set ADMIN_PASS='<your-strong-password>'
+fly secrets set ADMIN_USER='<your-admin-username>'
 ```
 Optional email reminders (leave unset to disable — the app no-ops without them):
 ```bash

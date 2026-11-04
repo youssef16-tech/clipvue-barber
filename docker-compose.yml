@@ -1,4 +1,4 @@
-﻿services:
+services:
   clipvue:
     build: .
     ports:
@@ -6,8 +6,8 @@
     environment:
       DATABASE_URL: /data/clipvue.db
       JWT_SECRET: change-me
-      ADMIN_USER: elrayes
-      ADMIN_PASS: "7ooda3M@$$&*"
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASS: ${ADMIN_PASS:-dev-only-change-me}
       DEV_MODE: "true"
     volumes:
       - ./data:/data
